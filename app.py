@@ -8,7 +8,7 @@ import pandas as pd
 # ==========================================
 # [설정] API 키 & 프롬프트
 # ==========================================
-DEFAULT_API_KEY = "AIzaSyCre823lmqEE7re0lccGRqQMOkKLRoRQoI" 
+DEFAULT_API_KEY = "" 
 
 SYSTEM_INSTRUCTION = """
 당신은 유능한 **법률 전문가 AI**입니다. 
