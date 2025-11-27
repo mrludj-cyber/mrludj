@@ -4,6 +4,7 @@ from google import genai
 from google.genai import types
 import time
 import pandas as pd
+import re 
 
 # ==========================================
 # [설정] API 키 & 프롬프트
@@ -14,11 +15,17 @@ SYSTEM_INSTRUCTION = """
 당신은 유능한 법률 전문가 팀(리서치 담당관 + 수석 변호사)입니다.
 사용자의 질문에 답하기 위해 반드시 **다음 2단계 프로세스**를 거쳐 답변을 작성해야 합니다.
 
+**[중요: 데이터 구조 안내]**
+업로드된 문서는 여러 판례가 하나로 합쳐진 **병합 파일(Merged File)**입니다.
+각 판례의 시작과 문단 앞에는 **`[ID:판례번호]`** 형태의 태그가 붙어 있습니다. (예: `[ID:2023다12345] ... 내용`)
+답변을 작성하거나 판례를 인용할 때, 파일명이 아닌 **이 `[ID:...]` 태그를 기준으로 판례 번호를 식별**해야 합니다.
+
 **[Step 1: 리서치 단계 (Fact Finding)]**
-* 먼저 문서 저장소(Store)를 검색하여 질문과 관련된 **모든 판례, 법령, 사실관계**를 있는 그대로 발췌하십시오.
-* 이 단계에서는 주관적인 의견을 배제하고, **"어떤 판례가 발견되었는가?"**에만 집중하십시오.
-* 발견된 판례는 `판례번호`, `판시사항`, `판결요지` 핵심을 요약하여 리스트화하십시오.
+* 문서 저장소(Store)를 검색하여 질문과 관련된 **모든 판례, 법령, 사실관계**를 있는 그대로 발췌하십시오.
+* **식별 규칙**: 텍스트 내에서 `[ID:판례번호]` 태그를 찾아, 해당 내용이 어떤 판례인지 정확히 특정하십시오. 태그가 없는 문장은 바로 앞이나 뒤의 문맥을 통해 ID를 추론하되, 불확실하면 인용하지 마십시오.
+* 발견된 판례는 `판례번호(ID)`, `판결키워드`, `핵심 요지`를 리스트화하십시오.
 * 사용자의 질문과 관련된 판례가 문서 내에 존재한다면, **중요도나 대표성을 따지지 말고 발견되는 모든 판례를 나열**해야 합니다.
+
 *[Step 1의 핵심 행동 수칙]*
 1. **Selection(선별) 금지**: "대표적인 판례 몇 가지만 소개합니다"라는 태도를 버리십시오. 비슷한 판례라도 사건 번호가 다르면 모두 나열하십시오.
 2. **Exhaustive Listing(포괄적 나열)**: 검색된 컨텍스트(Context) 내에 있는 판례가 10개면 10개, 20개면 20개를 전부 표에 적으십시오.
@@ -233,14 +240,31 @@ def query_store_with_history(client, current_question, store_name, history):
         if hasattr(response, "grounding_metadata") and response.grounding_metadata:
             if hasattr(response.grounding_metadata, "citations"):
                 for citation in response.grounding_metadata.citations:
-                    source_name = getattr(citation, "source", None)
-                    if not source_name: source_name = getattr(citation, "title", "문서")
-                    if isinstance(source_name, str) and "/" in source_name: 
-                        source_name = source_name.split("/")[-1]
+                    # 1. 인용된 텍스트 가져오기
+                    text_content = getattr(citation, "text", "")
                     
+                    # 2. 파일명 가져오기 (기본값)
+                    original_source = getattr(citation, "source", None)
+                    if not original_source: original_source = getattr(citation, "title", "문서")
+                    if isinstance(original_source, str) and "/" in original_source: 
+                        original_source = original_source.split("/")[-1] # 예: merged_batch_01.txt
+
+                    # 3. [핵심 수정] 텍스트 내용에서 '[ID:판례번호]' 패턴 추출 시도
+                    # 정규식 설명: \[ID:  -> "[ID:" 로 시작
+                    #             (.*?)  -> 그 뒤에 오는 모든 문자 (판례번호)를 캡처
+                    #             \]     -> "]" 로 끝남
+                    match = re.search(r"\[ID:(.*?)\]", text_content)
+                    
+                    if match:
+                        # ID를 찾았다면, 출처 이름을 판례번호로 변경 (예: 2023다12345)
+                        display_source = match.group(1) 
+                    else:
+                        # 태그가 잘려서 안 보이면, 그냥 파일명을 보여줌 (혹은 '판례번호 식별 불가')
+                        display_source = original_source
+
                     citations.append({
-                        "source": source_name, 
-                        "text": getattr(citation, "text", "")
+                        "source": display_source,   # UI에 표시될 이름 (이제 판례번호가 됨)
+                        "text": text_content
                     })
 
         return response.text, citations, None
