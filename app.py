@@ -11,7 +11,7 @@ import re
 # ==========================================
 DEFAULT_API_KEY = "" 
 
-SYSTEM_INSTRUCTION = """
+SYSTEM_PROMPT_CASELAW = """
 당신은 유능한 법률 전문가 팀(리서치 담당관 + 수석 변호사)입니다.
 사용자의 질문에 답하기 위해 반드시 **다음 2단계 프로세스**를 거쳐 답변을 작성해야 합니다.
 
@@ -63,6 +63,39 @@ SYSTEM_INSTRUCTION = """
 ### 2. ⚖️ 종합 법률 검토 의견
 (여기에 위 조사 내용을 종합한 전문가의 심층 분석 및 결론 제시)
 ---
+"""
+
+SYSTEM_PROMPT_MANUAL = """
+당신은 **법원실무제요 및 주석서 분석 전문가**입니다.
+사용자의 질문에 대해 업로드된 문헌을 바탕으로 답변을 작성해야 합니다.
+
+**[중요: 데이터 구조 안내]**
+문서의 각 문단이나 챕터 앞에는 **`[ID:식별자]`** 형태의 태그가 붙어 있습니다. (예: `[ID:민사집행_제3장_12조]`)
+이 태그는 해당 법리나 설명의 **정확한 출처(Source)**를 나타냅니다.
+
+**[행동 수칙]**
+1. **정확한 인용(Pinpoint Citation)**: 질문에 대한 답을 할 때, 해당 내용이 **어떤 ID(문단)**에 근거하는지 반드시 명시하십시오. 추측성 답변은 금지합니다.
+2. **구조적 파악**: 질문과 관련된 '정의', '절차', '효과', '예외' 등을 문서 곳곳에서 찾아 종합하십시오.
+3. **ID 리스트 작성**: 설명에 사용된 핵심 문헌의 ID들을 먼저 리스트로 정리하여 신뢰도를 높이십시오.
+
+**[출력 형식 가이드]**
+
+### 1. 📖 문헌 근거 리스트 (Evidence List)
+* 질문과 관련된 핵심 내용을 담고 있는 문단(ID)을 찾아 아래와 같이 정리하십시오.
+* ID는 태그 그대로 적으십시오.
+
+| 출처 ID | 구분(주제) | 핵심 내용 요약 |
+| :--- | :--- | :--- |
+| [ID:민사집행_p120] | 경매 개시 요건 | 경매 신청서에는 채권의 원인과... |
+| [ID:주석서_민법_500조] | 이행불능의 효과 | 채무자의 귀책사유가 입증되어야 하며... |
+
+### 2. ⚙️ 상세 법리 및 실무 절차 해설
+* 위에서 찾은 근거들을 바탕으로 질문에 대한 **상세한 설명**을 서술하십시오.
+* 문장 중간중간에 `(ID:...)`를 인용하여 근거를 밝히십시오.
+  * 예: "실무상 보증금 반환은 동시이행 관계에 있습니다([ID:주석서_p50]). 다만, 예외적으로 임차권등기명령이 된 경우...([ID:실무제요_p200])"
+
+### 3. ⚖️ 종합 검토 의견 (전문가 조언)
+* 위 법리와 실무 기준을 종합하여 질문자의 사안에 대한 최종적인 가이드라인을 제시하십시오.
 """
 
 st.set_page_config(page_title="Gemini Legal Search", page_icon="⚖️", layout="wide")
@@ -201,20 +234,17 @@ def upload_file(client, file, store_name):
     except Exception as e:
         return False, str(e)
 
-def query_store_with_history(client, current_question, store_name, history):
+# [핵심 수정] system_instruction을 인자로 받도록 수정
+def query_store_with_history(client, current_question, store_name, history, system_instruction):
     try:
-        # [수정] 조사 -> 종합 순서로 사고하도록 유도하는 프롬프트
+        # 질문 강화 프롬프트 (공통 사용)
         enhanced_question = f"""
         [사용자 질문]: {current_question}
         
         [수행 지침]:
-        1. 먼저 업로드된 문서들 중에서 위 질문과 연관된 판례, 법 조항, 핵심 문구를 **빠짐없이 검색(Search)**하여 나열하십시오.
-        2. 제공된 문서 컨텍스트(Context)를 바닥까지 긁어서(Exhaustively Search), 질문과 조금이라도 관련된 판례는 **단 하나도 빠뜨리지 말고 모두 나열**하십시오.
-        3. 만약 판례가 10개 이상 발견되면 10개 이상 모두 적으십시오. "그 외 다수 있음"이라고 줄이지 마십시오.
-        4. 단순한 요약보다는 **최대한 많은 판례 번호(Case Number)**를 확보하는 것이 이번 작업의 목표입니다.
-        5. 동일한 법리를 다루더라도 사건 번호가 다르면 별개의 항목으로 취급하여 리스트에 포함시키십시오.
-        6. 그 다음, 검색된 자료들을 **종합(Synthesize)**하여 논리적인 법률 검토 의견을 서술하십시오.
-        7. 조사가 부실하면 분석도 부실해집니다. **최대한 많은 근거**를 확보한 뒤 분석을 시작하십시오.
+        1. 지정된 시스템 지침(System Instruction)에 따라 문서를 검색하고 분석하십시오.
+        2. 제공된 문서 컨텍스트(Context)를 최대한 활용하여 근거 중심의 답변을 작성하십시오.
+        3. 문헌이나 판례의 내용이 발견되면 구체적으로 인용하십시오.
         """
 
         contents = []
@@ -225,45 +255,36 @@ def query_store_with_history(client, current_question, store_name, history):
         contents.append(types.Content(role="user", parts=[types.Part(text=enhanced_question)]))
 
         response = client.models.generate_content(
-            model="gemini-3-pro-preview", # [필수] 복합 추론을 위해 고성능 모델 사용
+            model="gemini-3-pro-preview", # [팁] 속도와 성능 균형이 좋은 최신 모델 권장 (필요시 gemini-1.5-pro 유지)
             contents=contents,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
+                system_instruction=system_instruction, # 여기서 선택된 프롬프트 주입
                 tools=[types.Tool(file_search=types.FileSearch(file_search_store_names=[store_name]))],
-                temperature=0.1,        # [설정] 0.1 : 사실에 기반하되 약간의 문장 구성력 허용
+                temperature=0.1,
                 max_output_tokens=8192 
             )
         )
         
-        # (Citations 처리 코드는 기존과 동일)
         citations = []
         if hasattr(response, "grounding_metadata") and response.grounding_metadata:
             if hasattr(response.grounding_metadata, "citations"):
                 for citation in response.grounding_metadata.citations:
-                    # 1. 인용된 텍스트 가져오기
                     text_content = getattr(citation, "text", "")
-                    
-                    # 2. 파일명 가져오기 (기본값)
                     original_source = getattr(citation, "source", None)
                     if not original_source: original_source = getattr(citation, "title", "문서")
                     if isinstance(original_source, str) and "/" in original_source: 
-                        original_source = original_source.split("/")[-1] # 예: merged_batch_01.txt
+                        original_source = original_source.split("/")[-1]
 
-                    # 3. [핵심 수정] 텍스트 내용에서 '[ID:판례번호]' 패턴 추출 시도
-                    # 정규식 설명: \[ID:  -> "[ID:" 로 시작
-                    #             (.*?)  -> 그 뒤에 오는 모든 문자 (판례번호)를 캡처
-                    #             \]     -> "]" 로 끝남
+                    # 판례 모드일 때만 유용한 ID 태그 검색
                     match = re.search(r"\[ID:(.*?)\]", text_content)
-                    
                     if match:
-                        # ID를 찾았다면, 출처 이름을 판례번호로 변경 (예: 2023다12345)
                         display_source = match.group(1) 
                     else:
-                        # 태그가 잘려서 안 보이면, 그냥 파일명을 보여줌 (혹은 '판례번호 식별 불가')
+                        # 태그가 없으면 파일명을 그대로 보여줌 (주석서용)
                         display_source = original_source
 
                     citations.append({
-                        "source": display_source,   # UI에 표시될 이름 (이제 판례번호가 됨)
+                        "source": display_source,
                         "text": text_content
                     })
 
@@ -287,6 +308,17 @@ with st.sidebar:
             st.session_state.client = client
             st.success("접속 성공")
             st.rerun()
+
+    st.divider()
+
+    # [UI 추가] 검색 모드 선택
+    st.subheader("🔍 검색 모드 설정")
+    search_mode = st.radio(
+        "분석 대상을 선택하세요:",
+        ("판례 검색 (Case Law)", "실무제요/주석서 (Manuals)"),
+        index=0,
+        help="**판례 검색**: [ID:...] 태그가 있는 판례 파일 중심\n**실무제요**: 법원실무제요, 주석서 등 일반 법률 문헌 중심"
+    )
 
     st.divider()
     
@@ -330,7 +362,8 @@ tab1, tab2 = st.tabs(["💬 법률 질의응답", "📂 파일 관리"])
 # Tab 1: 질의응답
 # ---------------------------------------------------------
 with tab1:
-    st.markdown("### 📘 문서 기반 법률 Q&A")
+    mode_label = "판례" if search_mode == "판례 검색 (Case Law)" else "법원실무제요/주석서"
+    st.markdown(f"### 📘 문서 기반 법률 Q&A - **[{mode_label} 모드]**")
 
     # 대화 내용 표시
     for chat in st.session_state.chat_history:
@@ -341,41 +374,46 @@ with tab1:
             st.markdown(chat["answer"])
             if chat.get("citations"):
                 st.markdown("---")
-                st.markdown("**:blue[👇 참고 문헌 (판례 원문 보기)]**")
+                st.markdown("**:blue[👇 참고 문헌 확인]**")
                 cols = st.columns(min(3, len(chat["citations"]))) 
                 for i, c in enumerate(chat["citations"]):
                     col_idx = i % 3
                     with cols[col_idx]:
                         short_source = c['source']
-                        if len(short_source) > 12: short_source = short_source[:10] + "..."
+                        if len(short_source) > 15: short_source = short_source[:13] + "..."
                         with st.popover(f"📜 {short_source}", use_container_width=True):
                             st.markdown(f"### 📄 출처: {c['source']}")
                             st.divider()
                             st.info(c['text']) 
 
-    # [입력창] 
-    # CSS에서 stBottom을 position: fixed !important로 설정하여
-    # 이 위젯이 어디에 선언되든 화면 최하단에 고정되도록 했습니다.
-    if question := st.chat_input("판례나 법률 내용에 대해 질문하세요..."):
+    # [입력창]
+    if question := st.chat_input("질문을 입력하세요..."):
         with st.chat_message("user", avatar="👤"):
             st.write(question)
 
         with st.chat_message("assistant", avatar="⚖️"):
-            with st.spinner("⚖️ 판례를 분석하고 있습니다..."):
+            # 선택된 모드에 따라 프롬프트 결정
+            selected_prompt = SYSTEM_PROMPT_CASELAW if search_mode == "판례 검색 (Case Law)" else SYSTEM_PROMPT_MANUAL
+            
+            with st.spinner(f"⚖️ {mode_label}를 분석하고 있습니다..."):
                 answer, citations, error = query_store_with_history(
-                    st.session_state.client, question, st.session_state.store.name, st.session_state.chat_history
+                    st.session_state.client, 
+                    question, 
+                    st.session_state.store.name, 
+                    st.session_state.chat_history,
+                    selected_prompt # 결정된 프롬프트 전달
                 )
                 if answer:
                     st.markdown(answer)
                     if citations:
                         st.markdown("---")
-                        st.markdown("**:blue[👇 참고 문헌 (판례 원문 보기)]**")
+                        st.markdown("**:blue[👇 참고 문헌 확인]**")
                         cols = st.columns(min(3, len(citations)))
                         for i, c in enumerate(citations):
                             col_idx = i % 3
                             with cols[col_idx]:
                                 short_source = c['source']
-                                if len(short_source) > 12: short_source = short_source[:10] + "..."
+                                if len(short_source) > 15: short_source = short_source[:13] + "..."
                                 with st.popover(f"📜 {short_source}", use_container_width=True):
                                     st.markdown(f"### 📄 출처: {c['source']}")
                                     st.divider()
@@ -385,7 +423,7 @@ with tab1:
                     st.error(f"오류가 발생했습니다: {error}")
 
 # ---------------------------------------------------------
-# Tab 2: 파일 관리
+# Tab 2: 파일 관리 (기존 유지)
 # ---------------------------------------------------------
 with tab2:
     st.header("📂 전체 파일 목록")
@@ -398,7 +436,7 @@ with tab2:
         st.info("조회된 파일이 없습니다.")
     st.divider()
     st.subheader("새 파일 업로드")
-    uploaded = st.file_uploader("파일 선택", accept_multiple_files=True)
+    uploaded = st.file_uploader("파일 선택 (판례 TXT 또는 실무제요 PDF 등)", accept_multiple_files=True)
     if uploaded and st.button("업로드 시작"):
         progress = st.progress(0)
         for i, f in enumerate(uploaded):
